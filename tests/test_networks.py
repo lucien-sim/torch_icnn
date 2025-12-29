@@ -3,12 +3,14 @@ try:
 except Exception:  # pragma: no cover - tests will skip if torch missing
     torch = None
 
-from icnn.networks import (
+from torch_icnn.networks import (
     PartiallyConvexNetwork,
     PartiallyConcaveNetwork,
+    ConstraintSpec,
+)
+from torch_icnn.validation import (
     validate_monotonicity_randomized,
     validate_convexity_randomized,
-    ConstraintSpec,
 )
 
 

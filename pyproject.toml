@@ -1,5 +1,5 @@
 [project]
-name = "icnn"
+name = "torch_icnn"
 version = "0.1.0"
 description = "ICNN-inspired feedforward neural networks in PyTorch."
 readme = "README.md"
