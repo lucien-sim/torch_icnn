@@ -188,13 +188,23 @@ def validate_convexity_randomized(
                         break
             return fail_examples
 
-        if net.n_convex > 0:
-            cfails = _jensen_test(list(net.convex_idx), sign=+1.0)
+        # Build index sets for convex and concave inputs from constraints
+        convex_idx = [i for i, c in enumerate(getattr(net, "constraints", [])) if c.convexity == "convex"]
+        concave_idx = [i for i, c in enumerate(getattr(net, "constraints", [])) if c.convexity == "concave"]
+
+        if len(convex_idx) > 0:
+            cfails = _jensen_test(convex_idx, sign=+1.0)
             jensen_failures["convex"].extend(cfails)
             if verbose:
                 print(f"[jensen] convex failures: {len(cfails)}")
 
-        ok = len(jensen_failures["convex"]) == 0
+        if len(concave_idx) > 0:
+            dfails = _jensen_test(concave_idx, sign=-1.0)
+            jensen_failures.setdefault("concave", []).extend(dfails)
+            if verbose:
+                print(f"[jensen] concave failures: {len(dfails)}")
+
+        ok = len(jensen_failures.get("convex", [])) == 0 and len(jensen_failures.get("concave", [])) == 0
         return {"ok": ok, "failures": jensen_failures}
     finally:
         if did_cast:

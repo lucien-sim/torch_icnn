@@ -6,6 +6,7 @@ except Exception:  # pragma: no cover - tests will skip if torch missing
 from torch_icnn.networks import (
     PartiallyConvexNetwork,
     PartiallyConcaveNetwork,
+    PartiallyMixedNetwork,
     ConstraintSpec,
 )
 from torch_icnn.validation import (
@@ -70,3 +71,22 @@ def test_partially_concave_wrapper_consistency():
     out_base = base(x)
     # concave wrapper should be negation of the convex base
     assert torch.allclose(out_conc, -out_base, atol=1e-5)
+
+
+def test_partially_mixed_small():
+    if torch is None:
+        return
+    # dims: 0 convex increasing, 1 concave decreasing, 2 free increasing
+    constraints = [
+        ConstraintSpec(convexity="convex", monotonicity="increasing"),
+        ConstraintSpec(convexity="concave", monotonicity="decreasing"),
+        ConstraintSpec(convexity="free", monotonicity="increasing"),
+    ]
+
+    net = PartiallyMixedNetwork(input_dim=3, hidden_sizes=(8, 8), constraints=constraints)
+
+    mres = validate_monotonicity_randomized(net, n_samples=512, eps=1e-4, tol_abs=1e-6, tol_rel=1e-6, seed=0)
+    assert mres["ok"], f"monotonicity failed: {mres['failures']}"
+
+    cres = validate_convexity_randomized(net, n_jensen=256, tol_abs=1e-6, tol_rel=1e-6, seed=0)
+    assert cres["ok"], f"convexity failed: {cres['failures']}"
