@@ -8,7 +8,6 @@ dependencies = [
     "torch", 
     "torchvision", 
     "numpy",
-    "graphviz>=0.21",
     "matplotlib>=3.10.7",
     "pandas>=2.3.3",
     "pyarrow>=22.0.0",
@@ -19,6 +18,8 @@ dev = [
     "ipykernel>=7.1.0",
     "pytest>=9.0.1",
     "marimo[recommended]>=0.18.4",
+    "torchviz>=0.0.3",
+    "graphviz>=0.21",
 ]
 
 [tool.marimo.runtime]

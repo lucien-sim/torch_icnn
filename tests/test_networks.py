@@ -54,6 +54,7 @@ def test_partially_concave_wrapper_consistency():
         ConstraintSpec(convexity="concave", monotonicity="decreasing"),
         ConstraintSpec(convexity="free", monotonicity="increasing"),
     ]
+    torch.manual_seed(0)
     conc = PartiallyConcaveNetwork(input_dim=2, hidden_sizes=(8,), constraints=constraints)
 
     # Construct equivalent convex base with flipped monotonicity
@@ -61,6 +62,7 @@ def test_partially_concave_wrapper_consistency():
         ConstraintSpec(convexity="convex", monotonicity="increasing"),  # flipped dec->inc and negated
         ConstraintSpec(convexity="free", monotonicity="decreasing"),
     ]
+    torch.manual_seed(0)
     base = PartiallyConvexNetwork(input_dim=2, hidden_sizes=(8,), constraints=base_constraints)
 
     x = torch.randn(5, 2)

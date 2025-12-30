@@ -40,22 +40,28 @@ def validate_monotonicity_randomized(
     if seed is not None:
         torch.manual_seed(int(seed))
 
-    device = (
-        next(net.parameters()).device
-        if any(p.requires_grad for p in net.parameters())
-        else torch.device("cpu")
-    )
-    D = net.input_dim
+    # determine device (robust if model has no parameters)
+    try:
+        first_param = next(net.parameters())
+        device = first_param.device
+    except StopIteration:
+        device = torch.device("cpu")
+
+    D = int(net.input_dim)
     X = (torch.rand(n_samples, D, device=device) * 2.0) - 1.0
-    Y = net(X)
+    # avoid tracking gradients for randomized checks
+    with torch.no_grad():
+        Y = net(X)
     Y_np = Y.cpu().detach().numpy()
     mono_failures = {}
-    for idx, m in net.mono_map.items():
-        if m is None:
+    for idx, c in enumerate(net.constraints):
+        m = c.monotonicity
+        if m == "free":
             continue
         Xp = X.clone()
         Xp[:, idx] = Xp[:, idx] + eps
-        Yp = net(Xp)
+        with torch.no_grad():
+            Yp = net(Xp)
         delta = (Yp - Y).cpu().detach().numpy()
         scale = np.maximum(1.0, np.abs(Y_np))
         if m == "increasing":
@@ -123,12 +129,13 @@ def validate_convexity_randomized(
     if seed is not None:
         torch.manual_seed(int(seed))
 
-    device = (
-        next(net.parameters()).device
-        if any(p.requires_grad for p in net.parameters())
-        else torch.device("cpu")
-    )
-    D = net.input_dim
+    # determine device (robust if model has no parameters)
+    try:
+        first_param = next(net.parameters())
+        device = first_param.device
+    except StopIteration:
+        device = torch.device("cpu")
+    D = int(net.input_dim)
 
     # ensure float32 for checks
     did_cast = False
@@ -147,22 +154,20 @@ def validate_convexity_randomized(
             if len(indices) == 0:
                 return fail_examples
             for _ in range(n_jensen):
-                base = (torch.rand(1, D, device=device, dtype=dtype) * 2.0) - 1.0
-                x1 = base.repeat(1, 1).view(D).unsqueeze(0)
-                x2 = base.repeat(1, 1).view(D).unsqueeze(0)
-                x1_vals = (
-                    torch.rand(len(indices), device=device, dtype=dtype) * 2.0
-                ) - 1.0
-                x2_vals = (
-                    torch.rand(len(indices), device=device, dtype=dtype) * 2.0
-                ) - 1.0
+                # construct two random points differing only on `indices`
+                x1 = (torch.rand(1, D, device=device, dtype=dtype) * 2.0) - 1.0
+                x2 = (torch.rand(1, D, device=device, dtype=dtype) * 2.0) - 1.0
+                # replace only the selected indices with independent random values
+                x1_vals = (torch.rand(len(indices), device=device, dtype=dtype) * 2.0) - 1.0
+                x2_vals = (torch.rand(len(indices), device=device, dtype=dtype) * 2.0) - 1.0
                 x1[0, indices] = x1_vals
                 x2[0, indices] = x2_vals
                 t = float(torch.rand(1).item())
                 xt = t * x1 + (1.0 - t) * x2
-                f1 = net(x1)[0].item()
-                f2 = net(x2)[0].item()
-                ft = net(xt)[0].item()
+                with torch.no_grad():
+                    f1 = net(x1)[0].item()
+                    f2 = net(x2)[0].item()
+                    ft = net(xt)[0].item()
                 left = ft * sign
                 right = (t * f1 + (1.0 - t) * f2) * sign
                 thresh = tol_abs + tol_rel * max(1.0, abs(right))
