@@ -257,7 +257,9 @@ class ConcaveSubnetwork(nn.Module):
             else [opp_monotonicity(m) for m in mono_list_concave]
         )
         fl_f = (
-            None if mono_list_free is None else [opp_monotonicity(m) for m in mono_list_free]
+            None
+            if mono_list_free is None
+            else [opp_monotonicity(m) for m in mono_list_free]
         )
 
         self._conv = ConvexSubnetwork(
@@ -301,7 +303,9 @@ class PartiallyConvexNetwork(nn.Module):
     ---------------------------
     - Activation σ is assumed convex and non-decreasing (e.g., ReLU).
     - U_i are enforced elementwise non-negative via Softplus.
-    - Wc_i (weights from convex inputs) can have any sign (convexity does not require sign constraints); convexity is instead enforced by non-negative recurrence U_i and non-negative readout weights w.
+    - Wc_i (weights from convex inputs) can have any sign (convexity does not
+    require sign constraints); convexity is instead enforced by non-negative
+    recurrence U_i and non-negative readout weights w.
     By induction: z^{(0)} = 0 is convex in y. If z^{(i)} is convex in y,
     then a^{(i+1)}(y) = Wc_i y + z^{(i)} U_i^T + ... is a sum of convex
     or linear terms (all non-negative combinations), so a^{(i+1)} is
@@ -467,8 +471,12 @@ class PartiallyConcaveNetwork(nn.Module):
         )
 
         # pass original monotonicities; ConcaveSubnetwork will flip them
-        mono_list_concave = [self.constraints[i].monotonicity for i in self.concave_idx_internal]
-        mono_list_free = [self.constraints[i].monotonicity for i in self.free_idx_internal]
+        mono_list_concave = [
+            self.constraints[i].monotonicity for i in self.concave_idx_internal
+        ]
+        mono_list_free = [
+            self.constraints[i].monotonicity for i in self.free_idx_internal
+        ]
 
         # build internal concave subnetwork (it flips monotonicities internally)
         self._conc = ConcaveSubnetwork(
@@ -561,7 +569,9 @@ class PartiallyMixedNetwork(nn.Module):
         mono_list_g_free = [self.constraints[i].monotonicity for i in self.free_idx]
 
         # pass original monotonicities for h; ConcaveSubnetwork will flip
-        mono_list_h_concave = [self.constraints[i].monotonicity for i in self.concave_idx]
+        mono_list_h_concave = [
+            self.constraints[i].monotonicity for i in self.concave_idx
+        ]
         mono_list_h_free = [self.constraints[i].monotonicity for i in self.free_idx]
 
         # build ConvexSubnetwork instance for g and ConcaveSubnetwork for h
