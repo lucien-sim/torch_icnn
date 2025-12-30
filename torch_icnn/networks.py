@@ -65,6 +65,7 @@ class PartiallyConvexNetwork(nn.Module):
             ConstraintSpec(convexity="free", monotonicity="free") if c is None else c
             for c in constraints
         ]
+        self.constraints = constraints
 
         if len(constraints) != self.input_dim:
             raise ValueError("constraints length must equal input_dim")
@@ -97,14 +98,12 @@ class PartiallyConvexNetwork(nn.Module):
         # per-input monotonicity map: idx -> 'increasing'|'decreasing'|None
         self.mono_map = {}
         for i, c in enumerate(constraints):
-            if c.convexity == "free":
-                self.mono_map[i] = None
-            elif c.monotonicity == "increasing":
+            if c.monotonicity == "increasing":
                 self.mono_map[i] = "increasing"
             elif c.monotonicity == "decreasing":
                 self.mono_map[i] = "decreasing"
             else:
-                self.mono_map[i] = None
+                self.mono_map[i] = "free"
 
         # counts
         self.n_convex = len(self.convex_idx)
@@ -117,8 +116,7 @@ class PartiallyConvexNetwork(nn.Module):
             return nn.ModuleList(
                 [nn.Linear(n_in, h, bias=True) for h in self.hidden_sizes]
             )
-
-        # U matrices (z -> z) between layers (enforced non-negative via softplus in forward)
+        
         def _make_raw_Us():
             raw_Us = nn.ParameterList()
             for i in range(len(self.hidden_sizes)):
@@ -131,28 +129,112 @@ class PartiallyConvexNetwork(nn.Module):
                     )
             return raw_Us
 
-        self.raw_Us = _make_raw_Us()
+        # Initialize all matrices for weights and biases
 
-        # per-layer mappings: convex inputs -> hidden, free inputs -> hidden
-        self.Wc_conv = _make_per_layer(self.n_convex)
-        self.Wu_free = _make_per_layer(self.n_free)
+        def _make_W_tilda_i():
+            raw_W_tildas = nn.ParameterList()
+            for i in range(len(self.hidden_sizes)):
+                prev = self.hidden_sizes[i - 1] if i > 0 else self.n_free
+                raw_W_tildas.append(
+                    nn.Parameter(torch.randn(self.hidden_sizes[i], prev) * 0.1)
+                )
+            return raw_W_tildas
+        
+        def _make_W_i_z(): 
+            W_i_zs = nn.ParameterList()
+            for i in range(len(self.hidden_sizes)):
+                prev = self.hidden_sizes[i - 1] if i > 0 else self.n_convex
+                W_i_zs.append(
+                    nn.Parameter(torch.randn(self.hidden_sizes[i], prev) * 0.1)
+                )
+            return W_i_zs
+        
+        def _make_W_i_zu(): 
+            W_i_zus = nn.ParameterList()
+            for i in range(len(self.hidden_sizes)):
+                size_u = self.hidden_sizes[i - 1] if i > 0 else self.n_free
+                size_z = self.hidden_sizes[i - 1] if i > 0 else self.n_convex
+                W_i_zus.append(
+                    nn.Parameter(torch.randn(size_z, size_u) * 0.1)  # Could be wrong! 
+                )
+            return W_i_zus
+        
+        def _make_W_i_y(): 
+            W_i_ys = nn.ParameterList()
+            for i in range(len(self.hidden_sizes)):
+                W_i_ys.append(
+                    nn.Parameter(torch.randn(self.hidden_sizes[i], self.n_convex) * 0.1)
+                )
+            return W_i_ys
+        
+        def _make_W_i_yu(): 
+            W_i_yus = nn.ParameterList()
+            for i in range(len(self.hidden_sizes)):
+                size_u = self.hidden_sizes[i - 1] if i > 0 else self.n_free
+                W_i_yus.append(
+                    nn.Parameter(torch.randn(self.n_convex, size_u) * 0.1)  # Could be wrong!
+                )
+            return W_i_yus
+        
+        def _make_W_i_u(): 
+            W_i_us = nn.ParameterList()
+            for i in range(len(self.hidden_sizes)):
+                size_u = self.hidden_sizes[i - 1] if i > 0 else self.n_free
+                W_i_us.append(
+                    nn.Parameter(torch.randn(self.hidden_sizes[i], size_u) * 0.1)
+                )
+            return W_i_us
+        
+        def _make_b_tilda_i(): 
+            b_tilda_i = nn.ParameterList()
+            for i in range(len(self.hidden_sizes)):
+                b_tilda_i.append(
+                    nn.Parameter(torch.randn(self.hidden_sizes[i]) * 0.1)
+                )
+            return b_tilda_i
+        
+        def _make_b_i_z(): 
+            b_i_z = nn.ParameterList()
+            for i in range(len(self.hidden_sizes)):
+                b_i_z.append(
+                    nn.Parameter(torch.randn(self.hidden_sizes[i]) * 0.1)
+                )
+            return b_i_z
+        
+        def _make_b_i_y(): 
+            b_i_y = nn.ParameterList()
+            for i in range(len(self.hidden_sizes)):
+                b_i_y.append(
+                    nn.Parameter(torch.randn(self.n_convex) * 0.1)
+                )
+            return b_i_y
+        
+        def _make_b_i(): 
+            b_i = nn.ParameterList()
+            for i in range(len(self.hidden_sizes)):
+                b_i.append(
+                    nn.Parameter(torch.randn(self.n_convex) * 0.1)
+                )
+            return b_i
+        
+        self.W_tilda_i = _make_W_tilda_i() if self.n_free > 0 else None
+        self.b_tilda_i = _make_b_tilda_i() if self.n_free > 0 else None
+        self.W_i_z = _make_W_i_z()
+        self.W_i_zu = _make_W_i_zu()
+        self.W_i_y = _make_W_i_y()
+        self.W_i_yu = _make_W_i_yu()
+        self.W_i_u = _make_W_i_u()
+        self.b_i_z = _make_b_i_z()
+        self.b_i_y = _make_b_i_y()
+        self.b_i = _make_b_i()
 
-        # per-layer u maps (compute u from the full free input vector)
-        self.linear_i_free = _make_per_layer(self.n_free)
-
-        # readout and per-input linear terms
-        self.readout_layer = nn.Linear(self.hidden_sizes[-1], 1, bias=False)
-        self.lin_xc = (
-            nn.Linear(self.n_convex, 1, bias=False) if self.n_convex > 0 else None
-        )
-        self.lin_xf = nn.Linear(self.n_free, 1, bias=False) if self.n_free > 0 else None
-
-        # bias term for the scalar readout
-        self.b_out = nn.Parameter(torch.zeros(1))
+        # Weight and bias for read-out
+        self.W_k = nn.Parameter(torch.randn(1, self.hidden_sizes[-1]) * 0.1)
+        self.b_k = nn.Parameter(torch.zeros(1))
 
     # apply per-input monotone constraints to columns of a weight matrix (out, in)
     def _apply_col_monotone(
-        self, raw_weight: torch.Tensor, mono_list: list | None
+        self, raw_weight: torch.Tensor, mono_list: list[str]
     ) -> torch.Tensor:
         """Apply per-column monotonicity constraints to a weight matrix.
         Achieved by applying softplus to enforce positivity for 'increasing' columns,
@@ -170,8 +252,6 @@ class PartiallyConvexNetwork(nn.Module):
         torch.Tensor
             New weight matrix with monotone columns enforced.
         """
-        if mono_list is None:
-            return raw_weight
         _, n_in = raw_weight.shape
         if n_in == 0:
             return raw_weight
@@ -184,7 +264,7 @@ class PartiallyConvexNetwork(nn.Module):
                 W[:, j] = raw_pos[:, j]
             elif m == "decreasing":
                 W[:, j] = -raw_pos[:, j]
-            # else keep raw
+            # if free, don't change weights
         return W
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -205,11 +285,11 @@ class PartiallyConvexNetwork(nn.Module):
 
         # compute per-layer z iteratively
         z = None
-        u = None
+        u = xf  # initial u_0 = xf
         for i in range(len(self.hidden_sizes)):
             # u contribution from full free input vector xf
-            if self.linear_i_free is not None:
-                mono_list_f = [self.mono_map[idx] for idx in self.free_idx]
+            if self.W_tilda_i is not None:
+                mono_list_f = [i for i, c in enumerate(self.constraints) if c.convexity == "free"]
                 W_u = self._apply_col_monotone(
                     self.linear_i_free[i].weight, mono_list_f
                 )
