@@ -1,4 +1,4 @@
-# TODO: understand the interaction module. 
+# TODO: make note that direction interaction between concave and convex variables is not supported. Only indirect through free variables.
 # TODO: get pytest working.
 # TODO: add some partial dependence visualization utilities.
 # TODO: test this properly
@@ -66,8 +66,8 @@ class ICNNBlock(nn.Module):
         n_convex: int,
         n_free: int,
         hidden_sizes: Sequence[int],
-        mono_list_c: list | None = None,
-        mono_list_f: list | None = None,
+        mono_list_convex: list | None = None,
+        mono_list_free: list | None = None,
         activation: nn.Module = nn.ReLU,
     ) -> None:
         super().__init__()
@@ -77,8 +77,10 @@ class ICNNBlock(nn.Module):
         assert len(self.hidden_sizes) > 0
         self.activation = activation()
         self.softplus = nn.Softplus()
-        self.mono_list_c = None if mono_list_c is None else list(mono_list_c)
-        self.mono_list_f = None if mono_list_f is None else list(mono_list_f)
+        self.mono_list_convex = (
+            None if mono_list_convex is None else list(mono_list_convex)
+        )
+        self.mono_list_free = None if mono_list_free is None else list(mono_list_free)
 
         # helper to create per-layer param lists
         def _make_params(n_in: int):
@@ -115,7 +117,7 @@ class ICNNBlock(nn.Module):
             if self.Wu_tilde_w is not None:
                 W_u_raw = self.Wu_tilde_w[i]
                 b_u = self.Wu_tilde_b[i]
-                W_u = apply_col_monotone(W_u_raw, self.mono_list_f, self.softplus)
+                W_u = apply_col_monotone(W_u_raw, self.mono_list_free, self.softplus)
                 u_ip1 = self.activation(F.linear(xf, W_u, b_u))
             else:
                 u_ip1 = 0.0
@@ -124,13 +126,13 @@ class ICNNBlock(nn.Module):
             if self.Wc_w is not None:
                 Wc_raw = self.Wc_w[i]
                 b_c = self.Wc_b[i]
-                Wc_w = apply_col_monotone(Wc_raw, self.mono_list_c, self.softplus)
+                Wc_w = apply_col_monotone(Wc_raw, self.mono_list_convex, self.softplus)
                 parts.append(F.linear(xc, Wc_w, b_c))
 
             if self.Wu_w is not None:
                 Wu_raw = self.Wu_w[i]
                 b_u = self.Wu_b[i]
-                Wu_w = apply_col_monotone(Wu_raw, self.mono_list_f, self.softplus)
+                Wu_w = apply_col_monotone(Wu_raw, self.mono_list_free, self.softplus)
                 parts.append(F.linear(xf, Wu_w, b_u))
 
             if i > 0:
@@ -152,16 +154,18 @@ class ReadoutModule(nn.Module):
         z_dim: int,
         n_convex: int,
         n_free: int,
-        mono_list_c: list | None = None,
-        mono_list_f: list | None = None,
+        mono_list_convex: list | None = None,
+        mono_list_free: list | None = None,
     ) -> None:
         super().__init__()
         self.z_dim = int(z_dim)
         self.n_convex = int(n_convex)
         self.n_free = int(n_free)
         self.softplus = nn.Softplus()
-        self.mono_list_c = None if mono_list_c is None else list(mono_list_c)
-        self.mono_list_f = None if mono_list_f is None else list(mono_list_f)
+        self.mono_list_convex = (
+            None if mono_list_convex is None else list(mono_list_convex)
+        )
+        self.mono_list_free = None if mono_list_free is None else list(mono_list_free)
 
         self.w_readout = nn.Parameter(torch.randn(1, self.z_dim) * 0.1)
         self.lin_xc_w = (
@@ -189,10 +193,12 @@ class ReadoutModule(nn.Module):
 
         readout = out_c
         if self.n_convex > 0:
-            W_xc = apply_col_monotone(self.lin_xc_w, self.mono_list_c, self.softplus)
+            W_xc = apply_col_monotone(
+                self.lin_xc_w, self.mono_list_convex, self.softplus
+            )
             readout = readout + F.linear(xc, W_xc, None).view(-1)
         if self.n_free > 0:
-            W_xf = apply_col_monotone(self.lin_xf_w, self.mono_list_f, self.softplus)
+            W_xf = apply_col_monotone(self.lin_xf_w, self.mono_list_free, self.softplus)
             readout = readout + F.linear(xf, W_xf, None).view(-1)
         readout = readout + self.b.view(1)
         return readout.view(-1)
@@ -207,15 +213,15 @@ class ConvexSubnetwork(nn.Module):
         n_free: int,
         hidden_sizes=(64, 64),
         activation: nn.Module = nn.ReLU,
-        mono_list_c: list | None = None,
-        mono_list_f: list | None = None,
+        mono_list_convex: list | None = None,
+        mono_list_free: list | None = None,
     ) -> None:
         super().__init__()
         self.block = ICNNBlock(
-            n_convex, n_free, hidden_sizes, mono_list_c, mono_list_f, activation
+            n_convex, n_free, hidden_sizes, mono_list_convex, mono_list_free, activation
         )
         self.readout = ReadoutModule(
-            hidden_sizes[-1], n_convex, n_free, mono_list_c, mono_list_f
+            hidden_sizes[-1], n_convex, n_free, mono_list_convex, mono_list_free
         )
 
     def forward(self, xc: torch.Tensor, xf: torch.Tensor) -> torch.Tensor:
@@ -224,17 +230,48 @@ class ConvexSubnetwork(nn.Module):
 
 
 class ConcaveSubnetwork(nn.Module):
-    """Wrapper that produces a concave contribution by negating a ConvexSubnetwork."""
+    """Wrapper that produces a concave contribution by negating a ConvexSubnetwork.
 
-    def __init__(self, *args, **kwargs) -> None:
+    The caller passes *original* monotonicity lists (as in constraints). This
+    wrapper flips monotonicities internally (using `opp_monotonicity`) before
+    constructing the internal `ConvexSubnetwork` so that the internal convex
+    subnetwork receives the opposite monotonicities and the overall output is
+    concave with the requested monotonicity behavior.
+    """
+
+    def __init__(
+        self,
+        n_concave: int,
+        n_free: int,
+        hidden_sizes=(64, 64),
+        activation: nn.Module = nn.ReLU,
+        mono_list_concave: list | None = None,
+        mono_list_free: list | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__()
-        self._conv = ConvexSubnetwork(*args, **kwargs)
+        # flip monotonicities for the internal convex subnetwork
+        fl_c = (
+            None
+            if mono_list_concave is None
+            else [opp_monotonicity(m) for m in mono_list_concave]
+        )
+        fl_f = (
+            None if mono_list_free is None else [opp_monotonicity(m) for m in mono_list_free]
+        )
+
+        self._conv = ConvexSubnetwork(
+            n_convex=n_concave,
+            n_free=n_free,
+            hidden_sizes=hidden_sizes,
+            activation=activation,
+            mono_list_convex=fl_c,
+            mono_list_free=fl_f,
+            **kwargs,
+        )
 
     def forward(self, xc: torch.Tensor, xf: torch.Tensor) -> torch.Tensor:
         return -self._conv(xc, xf)
-
-
-
 
 
 class PartiallyConvexNetwork(nn.Module):
@@ -350,8 +387,10 @@ class PartiallyConvexNetwork(nn.Module):
         self.n_free = len(self.free_idx)
 
         # Determine which inputs in xc and xf are monotonic (per-column lists)
-        self.mono_list_c = [constraints[idx].monotonicity for idx in self.convex_idx]
-        self.mono_list_f = [constraints[idx].monotonicity for idx in self.free_idx]
+        self.mono_list_convex = [
+            constraints[idx].monotonicity for idx in self.convex_idx
+        ]
+        self.mono_list_free = [constraints[idx].monotonicity for idx in self.free_idx]
 
         # Build a modular ConvexSubnetwork (ICNN block + readout)
         self._conv = ConvexSubnetwork(
@@ -359,8 +398,8 @@ class PartiallyConvexNetwork(nn.Module):
             n_free=self.n_free,
             hidden_sizes=self.hidden_sizes,
             activation=activation,
-            mono_list_c=self.mono_list_c,
-            mono_list_f=self.mono_list_f,
+            mono_list_convex=self.mono_list_convex,
+            mono_list_free=self.mono_list_free,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -420,41 +459,56 @@ class PartiallyConcaveNetwork(nn.Module):
 
         # Determine which indices map to internal convex inputs and frees
         # Concave inputs become internal convex inputs with flipped monotonicity
-        self.convex_idx_internal = tuple(i for i, c in enumerate(self.constraints) if c.convexity == "concave")
-        self.free_idx_internal = tuple(i for i, c in enumerate(self.constraints) if c.convexity == "free")
+        self.concave_idx_internal = tuple(
+            i for i, c in enumerate(self.constraints) if c.convexity == "concave"
+        )
+        self.free_idx_internal = tuple(
+            i for i, c in enumerate(self.constraints) if c.convexity == "free"
+        )
 
-        mono_list_c = [opp_monotonicity(self.constraints[i].monotonicity) for i in self.convex_idx_internal]
-        mono_list_f = [opp_monotonicity(self.constraints[i].monotonicity) for i in self.free_idx_internal]
+        # pass original monotonicities; ConcaveSubnetwork will flip them
+        mono_list_concave = [self.constraints[i].monotonicity for i in self.concave_idx_internal]
+        mono_list_free = [self.constraints[i].monotonicity for i in self.free_idx_internal]
 
-        # build internal convex subnetwork that we will negate
-        self._conv = ConvexSubnetwork(
-            n_convex=len(self.convex_idx_internal),
+        # build internal concave subnetwork (it flips monotonicities internally)
+        self._conc = ConcaveSubnetwork(
+            n_concave=len(self.concave_idx_internal),
             n_free=len(self.free_idx_internal),
             hidden_sizes=hidden_sizes,
             activation=activation,
-            mono_list_c=mono_list_c,
-            mono_list_f=mono_list_f,
+            mono_list_concave=mono_list_concave,
+            mono_list_free=mono_list_free,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.view(-1, self.input_dim).float()
         batch = x.shape[0]
-        xc = x[:, list(self.convex_idx_internal)] if len(self.convex_idx_internal) > 0 else torch.empty(batch, 0, dtype=x.dtype, device=x.device)
-        xf = x[:, list(self.free_idx_internal)] if len(self.free_idx_internal) > 0 else torch.empty(batch, 0, dtype=x.dtype, device=x.device)
-        return -self._conv(xc, xf)
+        xc = (
+            x[:, list(self.concave_idx_internal)]
+            if len(self.concave_idx_internal) > 0
+            else torch.empty(batch, 0, dtype=x.dtype, device=x.device)
+        )
+        xf = (
+            x[:, list(self.free_idx_internal)]
+            if len(self.free_idx_internal) > 0
+            else torch.empty(batch, 0, dtype=x.dtype, device=x.device)
+        )
+        return self._conc(xc, xf)
 
 
 class PartiallyMixedNetwork(nn.Module):
     """Partially mixed convex/concave network.
 
-    Implements f(x) = g(x_convex, x_free) - h(x_concave, x_free) where g and h
-    are `ConvexSubnetwork` instances. This enforces that nonlinear dependence on
-    convex inputs only appears in g and nonlinear dependence on concave inputs
-    only appears in h. Monotonicity constraints are mapped so that the combined
-    partial derivative has the requested sign:
+    Implements f(x) = g(x_convex, x_free) + h(x_concave, x_free) where g is a
+    `ConvexSubnetwork` (convex contribution) and h is a `ConcaveSubnetwork`
+    (negated convex -> concave contribution). This enforces that nonlinear
+    dependence on convex inputs only appears in g and nonlinear dependence on
+    concave inputs only appears in h. Monotonicity constraints are mapped so
+    that the combined partial derivative has the requested sign:
 
         - For a requested monotonicity 'increasing' on input j: g uses
-          'increasing' and h uses 'decreasing' so that ∂f/∂x_j = g' - h' ≥ 0.
+          'increasing' and the internal convex part of h uses 'decreasing' so
+          that ∂f/∂x_j = g' + h' ≥ 0 (h' is already negative for concave outputs).
 
     Interactions
     ------------
@@ -503,33 +557,30 @@ class PartiallyMixedNetwork(nn.Module):
         )
 
         # build mono lists for g and h
-        mono_list_g_c = [self.constraints[i].monotonicity for i in self.convex_idx]
-        mono_list_g_f = [self.constraints[i].monotonicity for i in self.free_idx]
+        mono_list_g_convex = [self.constraints[i].monotonicity for i in self.convex_idx]
+        mono_list_g_free = [self.constraints[i].monotonicity for i in self.free_idx]
 
-        mono_list_h_c = [
-            opp_monotonicity(self.constraints[i].monotonicity) for i in self.concave_idx
-        ]
-        mono_list_h_f = [opp_monotonicity(self.constraints[i].monotonicity) for i in self.free_idx]
+        # pass original monotonicities for h; ConcaveSubnetwork will flip
+        mono_list_h_concave = [self.constraints[i].monotonicity for i in self.concave_idx]
+        mono_list_h_free = [self.constraints[i].monotonicity for i in self.free_idx]
 
-        # build ConvexSubnetwork instances for g and h (h will be negated at combination)
+        # build ConvexSubnetwork instance for g and ConcaveSubnetwork for h
         self._g = ConvexSubnetwork(
             n_convex=len(self.convex_idx),
             n_free=len(self.free_idx),
             hidden_sizes=hidden_sizes,
             activation=activation,
-            mono_list_c=mono_list_g_c,
-            mono_list_f=mono_list_g_f,
+            mono_list_convex=mono_list_g_convex,
+            mono_list_free=mono_list_g_free,
         )
-        self._h = ConvexSubnetwork(
-            n_convex=len(self.concave_idx),
+        self._h = ConcaveSubnetwork(
+            n_concave=len(self.concave_idx),
             n_free=len(self.free_idx),
             hidden_sizes=hidden_sizes,
             activation=activation,
-            mono_list_c=mono_list_h_c,
-            mono_list_f=mono_list_h_f,
+            mono_list_concave=mono_list_h_concave,
+            mono_list_free=mono_list_h_free,
         )
-
-
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.view(-1, self.input_dim).float()
@@ -565,7 +616,7 @@ class PartiallyMixedNetwork(nn.Module):
         out_g = self._g(xg)
         out_h = self._h(xh)
 
-        return out_g - out_h
+        return out_g + out_h
 
 
 def viz() -> None:

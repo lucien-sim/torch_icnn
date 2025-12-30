@@ -31,6 +31,44 @@ def test_monotone_convex_small():
     assert cres["ok"], f"convexity failed: {cres['failures']}"
 
 
+def test_uses_concave_subnetwork():
+    if torch is None:
+        return
+    constraints = [
+        ConstraintSpec(convexity="concave", monotonicity="decreasing"),
+        ConstraintSpec(convexity="free", monotonicity="increasing"),
+    ]
+    net = PartiallyConcaveNetwork(input_dim=2, hidden_sizes=(8,), constraints=constraints)
+    from torch_icnn.networks import ConcaveSubnetwork, opp_monotonicity
+    assert isinstance(net._conc, ConcaveSubnetwork)
+
+    # verify the concave subnetwork flipped monotonicities internally
+    expected_convex = [opp_monotonicity(constraints[0].monotonicity)]
+    expected_free = [opp_monotonicity(constraints[1].monotonicity)]
+    assert net._conc._conv.block.mono_list_convex == expected_convex
+    assert net._conc._conv.block.mono_list_free == expected_free
+
+
+def test_mixed_uses_concave_subnetwork():
+    if torch is None:
+        return
+    constraints = [
+        ConstraintSpec(convexity="convex", monotonicity="increasing"),
+        ConstraintSpec(convexity="concave", monotonicity="decreasing"),
+        ConstraintSpec(convexity="free", monotonicity="increasing"),
+    ]
+
+    net = PartiallyMixedNetwork(input_dim=3, hidden_sizes=(8, 8), constraints=constraints)
+    from torch_icnn.networks import ConcaveSubnetwork, opp_monotonicity
+    assert isinstance(net._h, ConcaveSubnetwork)
+
+    # verify monotonicities were flipped inside the concave subnetwork
+    expected_h_convex = [opp_monotonicity(constraints[1].monotonicity)]
+    expected_h_free = [opp_monotonicity(constraints[2].monotonicity)]
+    assert net._h._conv.block.mono_list_convex == expected_h_convex
+    assert net._h._conv.block.mono_list_free == expected_h_free
+
+
 def test_gradients_signs():
     if torch is None:
         return
