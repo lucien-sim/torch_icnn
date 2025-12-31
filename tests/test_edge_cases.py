@@ -5,8 +5,6 @@ except Exception:  # pragma: no cover - tests will skip if torch missing
 
 from torch_icnn.networks import (
     PartiallyMixedNetwork,
-    PartiallyConvexNetwork,
-    PartiallyConcaveNetwork,
     ConstraintSpec,
 )
 from torch_icnn.validation import (

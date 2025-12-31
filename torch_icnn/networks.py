@@ -111,37 +111,69 @@ class ICNNBlock(nn.Module):
         self.Wu_tilde_w, self.Wu_tilde_b = _make_params(self.n_free)
 
     def forward(self, xc: torch.Tensor, xf: torch.Tensor) -> torch.Tensor:
+        # ensure batch size and device/dtype fallbacks
+        batch = (
+            xc.shape[0]
+            if xc is not None and xc.numel() >= 0
+            else (xf.shape[0] if xf is not None and xf.numel() >= 0 else 0)
+        )
+        device = (
+            xc.device
+            if xc is not None and xc.numel() >= 0
+            else (xf.device if xf is not None and xf.numel() >= 0 else None)
+        )
+        dtype = (
+            xc.dtype
+            if xc is not None and xc.numel() >= 0
+            else (xf.dtype if xf is not None and xf.numel() >= 0 else None)
+        )
+
         z = None
         for i in range(len(self.hidden_sizes)):
+            h = self.hidden_sizes[i]
+
             # u contribution from full free input vector xf
-            if self.Wu_tilde_w is not None:
+            if self.Wu_tilde_w is not None and self.n_free > 0:
                 W_u_raw = self.Wu_tilde_w[i]
                 b_u = self.Wu_tilde_b[i]
                 W_u = apply_col_monotone(W_u_raw, self.mono_list_free, self.softplus)
                 u_ip1 = self.activation(F.linear(xf, W_u, b_u))
             else:
-                u_ip1 = 0.0
+                u_ip1 = None
 
             parts = []
-            if self.Wc_w is not None:
+            # Contribution directly from convex variables
+            if self.Wc_w is not None and self.n_convex > 0:
                 Wc_raw = self.Wc_w[i]
                 b_c = self.Wc_b[i]
                 Wc_w = apply_col_monotone(Wc_raw, self.mono_list_convex, self.softplus)
                 parts.append(F.linear(xc, Wc_w, b_c))
 
-            if self.Wu_w is not None:
+            # Contribution directly from free variables
+            if self.Wu_w is not None and self.n_free > 0:
                 Wu_raw = self.Wu_w[i]
                 b_u = self.Wu_b[i]
                 Wu_w = apply_col_monotone(Wu_raw, self.mono_list_free, self.softplus)
                 parts.append(F.linear(xf, Wu_w, b_u))
 
+            # Contribution from previous layer Z via U recurrence
             if i > 0:
                 Upos = self.softplus(self.raw_U[i])
+                # ensure z is a tensor of correct shape
                 parts.append(z @ Upos.T)
+            
+            # contribution from u^{(i+1)}(f)
+            if u_ip1 is not None:
+                parts.append(u_ip1)
 
-            parts.append(u_ip1 if isinstance(u_ip1, torch.Tensor) else 0.0)
+            if parts:
+                agg = sum(parts)
+            else:
+                # no contributing inputs for this layer -> zero activation
+                dev = device if device is not None else next(self.parameters()).device
+                dt = dtype if dtype is not None else torch.get_default_dtype()
+                agg = torch.zeros(batch, h, dtype=dt, device=dev)
 
-            agg = sum(parts) if parts else 0.0
             z = self.activation(agg)
         return z
 
@@ -407,6 +439,11 @@ class PartiallyConvexNetwork(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # handle zero-input-dimension safely (avoid ambiguous reshapes)
+        if self.input_dim == 0:
+            batch = x.shape[0] if x.ndim >= 1 else 0
+            return torch.zeros(batch, dtype=x.dtype, device=x.device)
+
         x = x.view(-1, self.input_dim).float()
         batch = x.shape[0]
 
@@ -489,6 +526,11 @@ class PartiallyConcaveNetwork(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # handle zero-input-dimension safely (avoid ambiguous reshapes)
+        if self.input_dim == 0:
+            batch = x.shape[0] if x.ndim >= 1 else 0
+            return torch.zeros(batch, dtype=x.dtype, device=x.device)
+
         x = x.view(-1, self.input_dim).float()
         batch = x.shape[0]
         xc = (
@@ -564,32 +606,31 @@ class PartiallyMixedNetwork(nn.Module):
             i for i, c in enumerate(self.constraints) if c.convexity == "free"
         )
 
-        # build mono lists for g and h
-        mono_list_g_convex = [self.constraints[i].monotonicity for i in self.convex_idx]
-        mono_list_g_free = [self.constraints[i].monotonicity for i in self.free_idx]
+        # Build `PartiallyConvexNetwork` for g and `PartiallyConcaveNetwork` for h.
 
-        # pass original monotonicities for h; ConcaveSubnetwork will flip
-        mono_list_h_concave = [
-            self.constraints[i].monotonicity for i in self.concave_idx
+        # constraints for g: first convex inputs, then free inputs —
+        # use existing ConstraintSpec objects in the right order
+        constraints_g = [self.constraints[i] for i in self.convex_idx] + [
+            self.constraints[i] for i in self.free_idx
         ]
-        mono_list_h_free = [self.constraints[i].monotonicity for i in self.free_idx]
 
-        # build ConvexSubnetwork instance for g and ConcaveSubnetwork for h
-        self._g = ConvexSubnetwork(
-            n_convex=len(self.convex_idx),
-            n_free=len(self.free_idx),
+        # constraints for h: first concave inputs, then free inputs —
+        # use existing ConstraintSpec objects in the right order
+        constraints_h = [self.constraints[i] for i in self.concave_idx] + [
+            self.constraints[i] for i in self.free_idx
+        ]
+
+        self._g = PartiallyConvexNetwork(
+            input_dim=len(self.convex_idx) + len(self.free_idx),
             hidden_sizes=hidden_sizes,
             activation=activation,
-            mono_list_convex=mono_list_g_convex,
-            mono_list_free=mono_list_g_free,
+            constraints=constraints_g,
         )
-        self._h = ConcaveSubnetwork(
-            n_concave=len(self.concave_idx),
-            n_free=len(self.free_idx),
+        self._h = PartiallyConcaveNetwork(
+            input_dim=len(self.concave_idx) + len(self.free_idx),
             hidden_sizes=hidden_sizes,
             activation=activation,
-            mono_list_concave=mono_list_h_concave,
-            mono_list_free=mono_list_h_free,
+            constraints=constraints_h,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -612,20 +653,16 @@ class PartiallyMixedNetwork(nn.Module):
             else torch.empty(batch, 0, dtype=x.dtype, device=x.device)
         )
 
-        xg = (
-            torch.cat([xc, xf], dim=1)
-            if (xc.numel() or xf.numel())
-            else torch.empty(batch, 0, dtype=x.dtype, device=x.device)
-        )
-        xh = (
-            torch.cat([xn, xf], dim=1)
-            if (xn.numel() or xf.numel())
-            else torch.empty(batch, 0, dtype=x.dtype, device=x.device)
-        )
+        # Inputs for the two networks
+        xg = torch.cat([xc, xf], dim=1)
+        xh = torch.cat([xn, xf], dim=1)
 
+        # note: ConvexSubnetwork expects two inputs: (xc, xf) or (xn, xf)
         out_g = self._g(xg)
         out_h = self._h(xh)
 
+        # h is a convex subnetwork whose output is subtracted to produce a
+        # concave contribution: f(x) = g(xc,xf) - h(xn,xf)
         return out_g + out_h
 
 
@@ -658,4 +695,6 @@ __all__ = [
     "ReadoutModule",
     "ConvexSubnetwork",
     "ConcaveSubnetwork",
+    # utilities
+    "opp_monotonicity",
 ]

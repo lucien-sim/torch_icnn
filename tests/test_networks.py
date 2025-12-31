@@ -59,14 +59,15 @@ def test_mixed_uses_concave_subnetwork():
     ]
 
     net = PartiallyMixedNetwork(input_dim=3, hidden_sizes=(8, 8), constraints=constraints)
-    from torch_icnn.networks import ConcaveSubnetwork, opp_monotonicity
-    assert isinstance(net._h, ConcaveSubnetwork)
+    from torch_icnn.networks import ConvexSubnetwork, opp_monotonicity
+    assert isinstance(net._g, ConvexSubnetwork)
+    assert isinstance(net._h, ConvexSubnetwork)
 
-    # verify monotonicities were flipped inside the concave subnetwork
+    # verify monotonicities were flipped for the h convex subnetwork
     expected_h_convex = [opp_monotonicity(constraints[1].monotonicity)]
     expected_h_free = [opp_monotonicity(constraints[2].monotonicity)]
-    assert net._h._conv.block.mono_list_convex == expected_h_convex
-    assert net._h._conv.block.mono_list_free == expected_h_free
+    assert net._h.block.mono_list_convex == expected_h_convex
+    assert net._h.block.mono_list_free == expected_h_free
 
 
 def test_gradients_signs():
@@ -126,5 +127,14 @@ def test_partially_mixed_small():
     mres = validate_monotonicity_randomized(net, n_samples=512, eps=1e-4, tol_abs=1e-6, tol_rel=1e-6, seed=0)
     assert mres["ok"], f"monotonicity failed: {mres['failures']}"
 
+    # Check g and h subnetworks separately
+    print("Types:", type(net._g), type(net._h))
+    gres = validate_convexity_randomized(net._g, n_jensen=512, seed=0)
+    assert gres["ok"], f"g convexity failed: {gres['failures']}"
+    hres = validate_convexity_randomized(net._h, n_jensen=512, seed=0)
+    assert hres["ok"], f"h convexity failed: {hres['failures']}"
+
+    # Check them together
     cres = validate_convexity_randomized(net, n_jensen=256, tol_abs=1e-6, tol_rel=1e-6, seed=0)
     assert cres["ok"], f"convexity failed: {cres['failures']}"
+

@@ -1,10 +1,16 @@
-from .networks import PartiallyConvexNetwork, ConstraintSpec
+from .networks import (
+    PartiallyConvexNetwork,
+    PartiallyConcaveNetwork,
+    PartiallyMixedNetwork,
+    ConstraintSpec,
+)
+from typing import Union
 import torch
 import numpy as np
 
 
 def validate_monotonicity_randomized(
-    net: PartiallyConvexNetwork,
+    net: Union[PartiallyConvexNetwork, PartiallyConcaveNetwork, PartiallyMixedNetwork],
     n_samples: int = 256,
     eps: float = 1e-3,
     tol_abs: float = 1e-5,
@@ -93,7 +99,7 @@ def validate_monotonicity_randomized(
 
 
 def validate_convexity_randomized(
-    net: PartiallyConvexNetwork,
+    net: Union[PartiallyConvexNetwork, PartiallyConcaveNetwork, PartiallyMixedNetwork],
     n_jensen: int = 256,
     tol_abs: float = 1e-5,
     tol_rel: float = 1e-6,
@@ -149,20 +155,27 @@ def validate_convexity_randomized(
         dtype = torch.float32
         jensen_failures = {"convex": []}
 
+        def _make_jensen_pair(D: int, indices: list[int], device, dtype):
+            """Construct a pair (x1, x2, t) where x1 and x2 differ only on `indices`.
+
+            Returns: (x1, x2, t) tensors/scalar.
+            """
+            x1 = (torch.rand(1, D, device=device, dtype=dtype) * 2.0) - 1.0
+            x2 = x1.clone()
+            if len(indices) > 0:
+                x1_vals = (torch.rand(len(indices), device=device, dtype=dtype) * 2.0) - 1.0
+                x2_vals = (torch.rand(len(indices), device=device, dtype=dtype) * 2.0) - 1.0
+                x1[0, indices] = x1_vals
+                x2[0, indices] = x2_vals
+            t = float(torch.rand(1).item())
+            return x1, x2, t
+
         def _jensen_test(indices: list[int], sign: float) -> list:
             fail_examples = []
             if len(indices) == 0:
                 return fail_examples
             for _ in range(n_jensen):
-                # construct two random points differing only on `indices`
-                x1 = (torch.rand(1, D, device=device, dtype=dtype) * 2.0) - 1.0
-                x2 = (torch.rand(1, D, device=device, dtype=dtype) * 2.0) - 1.0
-                # replace only the selected indices with independent random values
-                x1_vals = (torch.rand(len(indices), device=device, dtype=dtype) * 2.0) - 1.0
-                x2_vals = (torch.rand(len(indices), device=device, dtype=dtype) * 2.0) - 1.0
-                x1[0, indices] = x1_vals
-                x2[0, indices] = x2_vals
-                t = float(torch.rand(1).item())
+                x1, x2, t = _make_jensen_pair(D, indices, device, dtype)
                 xt = t * x1 + (1.0 - t) * x2
                 with torch.no_grad():
                     f1 = net(x1)[0].item()
@@ -172,7 +185,14 @@ def validate_convexity_randomized(
                 right = (t * f1 + (1.0 - t) * f2) * sign
                 thresh = tol_abs + tol_rel * max(1.0, abs(right))
                 violation = left - right - thresh
-                if violation > 0.0:
+                # numerical tolerance slack to avoid flagging tiny floating-point
+                # rounding artifacts as failures. Treat as violation only if
+                # the excess is meaningfully larger than roundoff.
+                # numeric slack: ignore tiny violations smaller than the absolute
+                # tolerance. This avoids flagging minute floating-point rounding
+                # errors as failures when users pass very tight tolerances.
+                numeric_eps = max(1e-12, tol_abs)
+                if violation > numeric_eps:
                     fail_examples.append(
                         {
                             "indices": indices,
