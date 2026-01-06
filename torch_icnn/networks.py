@@ -18,6 +18,15 @@ class ConstraintSpec:
     convexity: Literal["convex", "concave", "free"] = "free"
     monotonicity: Literal["increasing", "decreasing", "free"] = "free"
 
+    @property
+    def monotonicity_r(self) -> str:
+        if self.monotonicity == "increasing":
+            return "decreasing"
+        elif self.monotonicity == "decreasing":
+            return "increasing"
+        else:
+            return "free"
+
 
 def opp_monotonicity(m: str) -> Literal["increasing", "decreasing", "free"]:
     """Return the opposite monotonicity: 'increasing' <-> 'decreasing', 'free' -> 'free'."""
@@ -161,7 +170,7 @@ class ICNNBlock(nn.Module):
                 Upos = self.softplus(self.raw_U[i])
                 # ensure z is a tensor of correct shape
                 parts.append(z @ Upos.T)
-            
+
             # contribution from u^{(i+1)}(f)
             if u_ip1 is not None:
                 parts.append(u_ip1)
@@ -214,9 +223,16 @@ class ReadoutModule(nn.Module):
         self, z: torch.Tensor, xc: torch.Tensor, xf: torch.Tensor
     ) -> torch.Tensor:
         if z is not None:
-            rw = apply_col_monotone(
-                self.w_readout, ["increasing"] * self.z_dim, self.softplus
-            )
+            # If we have convex inputs, keep the ICNN convexity guarantee by
+            # enforcing non-negative readout weights; otherwise leave the
+            # readout unconstrained so purely "free" networks retain full
+            # expressivity (avoids degenerating to the mean).
+            if self.n_convex > 0:
+                rw = apply_col_monotone(
+                    self.w_readout, ["increasing"] * self.z_dim, self.softplus
+                )
+            else:
+                rw = self.w_readout
             out_c = F.linear(z, rw, None).view(-1)
         else:
             out_c = torch.zeros(
